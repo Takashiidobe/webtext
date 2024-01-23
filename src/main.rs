@@ -1,10 +1,13 @@
 use html2text::from_read;
 use std::{
-    io,
+    error::Error,
+    io::{self},
     time::{Duration, Instant},
 };
+use tui_input::{backend::crossterm::EventHandler, Input};
 
 use crossterm::{
+    cursor::{Hide, Show},
     event::{self, read, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -18,9 +21,10 @@ struct App {
     pub vertical_scroll: usize,
     pub horizontal_scroll: usize,
     pub show_popup: bool,
+    pub length: u16,
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<(), Box<dyn Error>> {
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -31,7 +35,7 @@ fn main() -> Result<()> {
     // create app and run it
     let tick_rate = Duration::from_millis(250);
     let app = App::default();
-    let res = run_app(&mut terminal, app, tick_rate);
+    run_app(&mut terminal, app, tick_rate)?;
 
     // restore terminal
     disable_raw_mode()?;
@@ -42,11 +46,16 @@ fn main() -> Result<()> {
     )?;
     terminal.show_cursor()?;
 
-    if let Err(err) = res {
-        println!("{err:?}");
-    }
-
     Ok(())
+}
+
+fn vec_to_num(vec: &[usize]) -> usize {
+    let res = vec.iter().fold(0, |acc, elem| acc * 10 + elem);
+    if res == 0 {
+        1
+    } else {
+        res
+    }
 }
 
 fn run_app<B: Backend>(
@@ -54,9 +63,16 @@ fn run_app<B: Backend>(
     mut app: App,
     tick_rate: Duration,
 ) -> io::Result<()> {
+    let mut html = None;
     let mut last_tick = Instant::now();
+    let mut buffer = vec![];
     loop {
-        terminal.draw(|f| ui(f, &mut app))?;
+        if html.is_some() {
+            terminal.draw(|f| {
+                app.length = f.size().width;
+                ui(f, &mut app, html.clone())
+            })?;
+        }
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if crossterm::event::poll(timeout)? {
@@ -64,26 +80,105 @@ fn run_app<B: Backend>(
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Char('j') => {
-                        app.vertical_scroll = app.vertical_scroll.saturating_add(1);
+                        let num = vec_to_num(&buffer);
+                        app.vertical_scroll = app.vertical_scroll.saturating_add(num);
                         app.vertical_scroll_state =
                             app.vertical_scroll_state.position(app.vertical_scroll);
+                        buffer.clear();
                     }
                     KeyCode::Char('k') => {
-                        app.vertical_scroll = app.vertical_scroll.saturating_sub(1);
+                        let num = vec_to_num(&buffer);
+                        app.vertical_scroll = app.vertical_scroll.saturating_sub(num);
+                        app.vertical_scroll_state =
+                            app.vertical_scroll_state.position(app.vertical_scroll);
+                        buffer.clear();
+                    }
+                    KeyCode::Char('h') => {
+                        let num = vec_to_num(&buffer);
+                        app.horizontal_scroll = app.horizontal_scroll.saturating_sub(num);
+                        app.horizontal_scroll_state =
+                            app.horizontal_scroll_state.position(app.horizontal_scroll);
+                        buffer.clear();
+                    }
+                    KeyCode::Char('l') => {
+                        let num = vec_to_num(&buffer);
+                        app.horizontal_scroll = app.horizontal_scroll.saturating_add(num);
+                        app.horizontal_scroll_state =
+                            app.horizontal_scroll_state.position(app.horizontal_scroll);
+                        buffer.clear();
+                    }
+                    KeyCode::Char('g') => {
+                        app.vertical_scroll = 0;
                         app.vertical_scroll_state =
                             app.vertical_scroll_state.position(app.vertical_scroll);
                     }
-                    KeyCode::Char('h') => {
-                        app.horizontal_scroll = app.horizontal_scroll.saturating_sub(1);
-                        app.horizontal_scroll_state =
-                            app.horizontal_scroll_state.position(app.horizontal_scroll);
+                    KeyCode::Char('G') => {
+                        if let Some(ref h) = html {
+                            app.vertical_scroll = h.lines().count();
+                            app.vertical_scroll_state =
+                                app.vertical_scroll_state.position(app.vertical_scroll);
+                        }
                     }
-                    KeyCode::Char('l') => {
-                        app.horizontal_scroll = app.horizontal_scroll.saturating_add(1);
-                        app.horizontal_scroll_state =
-                            app.horizontal_scroll_state.position(app.horizontal_scroll);
+                    KeyCode::Char('s') => {
+                        use std::io::{stdout, Write};
+                        use tui_input::backend::crossterm as backend;
+
+                        app.show_popup = !app.show_popup;
+                        let mut input: Input = "".into();
+                        let stdout = stdout();
+                        let mut stdout = stdout.lock();
+                        backend::write(
+                            &mut stdout,
+                            input.value(),
+                            input.cursor(),
+                            (0, 0),
+                            app.length,
+                        )?;
+                        stdout.flush()?;
+
+                        loop {
+                            let event = read()?;
+
+                            if let Event::Key(KeyEvent { code, .. }) = event {
+                                match code {
+                                    KeyCode::Esc | KeyCode::Enter => {
+                                        break;
+                                    }
+                                    _ => {
+                                        if input.handle_event(&event).is_some() {
+                                            backend::write(
+                                                &mut stdout,
+                                                input.value(),
+                                                input.cursor(),
+                                                (0, 0),
+                                                15,
+                                            )?;
+                                            stdout.flush()?;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let client = reqwest::blocking::Client::new();
+                        let response =
+                        client.get(input.to_string()).header("User-Agent","User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0").header("Accept", "text/html")
+                                    .send()
+                                    .unwrap().text().unwrap().trim().to_string();
+                        let mut response_html = String::default();
+                        for line in response.lines() {
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            response_html.push_str(line.trim());
+                            response_html.push('\n');
+                        }
+                        html = Some(response_html);
                     }
-                    KeyCode::Char('s') => app.show_popup = !app.show_popup,
+                    KeyCode::Char(c) => {
+                        if c.is_ascii_digit() {
+                            buffer.push(c.to_digit(10).unwrap() as usize);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -94,55 +189,12 @@ fn run_app<B: Backend>(
     }
 }
 
-use std::io::{stdout, Result, Write};
-use tui_input::backend::crossterm as backend;
-use tui_input::backend::crossterm::EventHandler;
-use tui_input::Input;
-
-// fn show_input() -> io::Result<String> {
-//     let stdout = stdout();
-//     let mut stdout = stdout.lock();
-//     let mut input: Input = "https://".into();
-//     backend::write(&mut stdout, input.value(), input.cursor(), (0, 0), 15)?;
-//     stdout.flush()?;
-//
-//     loop {
-//         let event = read()?;
-//
-//         if let Event::Key(KeyEvent { code, .. }) = event {
-//             match code {
-//                 KeyCode::Esc | KeyCode::Enter => {
-//                     break;
-//                 }
-//                 _ => {
-//                     if input.handle_event(&event).is_some() {
-//                         backend::write(&mut stdout, input.value(), input.cursor(), (0, 0), 15)?;
-//                         stdout.flush()?;
-//                     }
-//                 }
-//             }
-//         }
-//     }
-//     Ok(input.to_string())
-// }
-
-fn ui(f: &mut Frame, app: &mut App) {
-    use std::env::args;
-    let arguments: Vec<_> = args().collect();
-    let url = arguments[1].to_string();
+fn ui(f: &mut Frame, app: &mut App, html: Option<String>) {
+    let Some(h) = html else { return };
     let size = f.size();
+    let terminal_width = size.width;
 
-    // if app.show_popup {
-    // let new_url = show_input().unwrap();
-    // url = new_url;
-    //  app.show_popup = false;
-    // }
-
-    let html = reqwest::blocking::get(url.to_owned())
-        .unwrap()
-        .bytes()
-        .unwrap();
-    let parsed = from_read(&html[..], size.width.into());
+    let parsed = from_read(h.as_bytes(), terminal_width.saturating_sub(3).into());
 
     let block = Block::default().black();
     f.render_widget(block, size);
@@ -175,7 +227,15 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     let paragraph = Paragraph::new(text.clone())
         .gray()
-        .block(create_block("Vertical scrollbar with arrows"))
+        .block(create_block(
+            h.lines()
+                .find(|l| l.starts_with("<title>"))
+                .unwrap_or("<title>Unknown Title</title>")
+                .strip_prefix("<title>")
+                .unwrap()
+                .strip_suffix("</title>")
+                .unwrap(),
+        ))
         .scroll((app.vertical_scroll as u16, 0));
     f.render_widget(paragraph, chunks[1]);
     f.render_stateful_widget(
