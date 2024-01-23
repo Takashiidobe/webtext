@@ -67,12 +67,12 @@ fn run_app<B: Backend>(
     let mut last_tick = Instant::now();
     let mut buffer = vec![];
     loop {
-        if html.is_some() {
-            terminal.draw(|f| {
-                app.length = f.size().width;
+        terminal.draw(|f| {
+            app.length = f.size().width;
+            if html.is_some() {
                 ui(f, &mut app, html.clone())
-            })?;
-        }
+            }
+        })?;
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if crossterm::event::poll(timeout)? {
@@ -119,6 +119,7 @@ fn run_app<B: Backend>(
                                 app.vertical_scroll_state.position(app.vertical_scroll);
                         }
                     }
+                    KeyCode::Char('c') => html = None,
                     KeyCode::Char('s') => {
                         use std::io::{stdout, Write};
                         use tui_input::backend::crossterm as backend;
@@ -151,7 +152,7 @@ fn run_app<B: Backend>(
                                                 input.value(),
                                                 input.cursor(),
                                                 (0, 0),
-                                                15,
+                                                app.length,
                                             )?;
                                             stdout.flush()?;
                                         }
@@ -160,8 +161,18 @@ fn run_app<B: Backend>(
                             }
                         }
                         let client = reqwest::blocking::Client::new();
+                        let url = {
+                            let input = input.to_string();
+                            if input.starts_with("http://") || input.starts_with("https://") {
+                                input
+                            } else {
+                                let mut url = String::from("https://");
+                                url.push_str(&input);
+                                url
+                            }
+                        };
                         let response =
-                        client.get(input.to_string()).header("User-Agent","User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0").header("Accept", "text/html")
+                        client.get(url).header("User-Agent","User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0").header("Accept", "text/html")
                                     .send()
                                     .unwrap().text().unwrap().trim().to_string();
                         let mut response_html = String::default();
@@ -229,7 +240,7 @@ fn ui(f: &mut Frame, app: &mut App, html: Option<String>) {
         .gray()
         .block(create_block(
             h.lines()
-                .find(|l| l.starts_with("<title>"))
+                .find(|l| l.starts_with("<title>") && l.ends_with("</title>"))
                 .unwrap_or("<title>Unknown Title</title>")
                 .strip_prefix("<title>")
                 .unwrap()
